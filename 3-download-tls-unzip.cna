@@ -1,0 +1,237 @@
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.io.BufferedInputStream;
+import java.io.FileOutputStream;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.File;
+import java.net.URL;
+import java.net.URLConnection;
+import java.io.IOException;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.cert.X509Certificate;
+import java.security.KeyStore;
+
+# ===== Global Variables =====
+$saveFilePath = script_resource() . "/downloads"; # Location to store downloaded zips
+$destPath = script_resource(); # Unzipped repositories destination folder is relative to this scripts location
+# ============================
+
+# ==== Git Repositories ====
+# Name, repository ID, branch, [CNA script paths to load]
+# Name => repository will be downloaded into this folder, the name has to match the path that is used to load the bofs! (see the modified cna script)
+# URL to download zip from => GitLab repository ID
+# Paths => relative path from root directory to the cna script to load
+
+@repositories = @(
+	@("CS-Situational-Awareness-BOF", "https://github.com/trustedsec/CS-Situational-Awareness-BOF/archive/refs/heads/master.zip", "CS-Situational-Awareness-BOF-master/SA/SA.cna"),
+	@("CS-Remote-OPs-BOF", "https://github.com/trustedsec/CS-Remote-OPs-BOF/archive/refs/heads/main.zip", "CS-Remote-OPs-BOF-main/Remote/Remote.cna", "CS-Remote-OPs-BOF-main/Injection/Injection.cna"),
+	# add other entries here as well
+  );
+# ============================
+
+# ==== Functions ====
+# Download all repository zip files one by one
+sub loadArsenal {
+	for($i = 0; $i < size(@repositories); $i++) {
+		downloadRepo(@repositories[$i][1],@repositories[$i][0]);
+		unzip(@repositories[$i][0], @repositories[$i][0]);
+	}
+}
+
+# createFile($path);
+sub createFile {
+	$path = $1;
+
+	createNewFile($path);
+	if (checkError($error)) {
+		warn("Cannot create file $path: $error");
+		$eMsg = "true";
+	}
+}
+
+# writeFile($handle, $path);
+sub writeFile {
+	$handle = $1;
+	$path = $2;
+
+	$outFile = openf(">" . $path);
+	writeb($outFile, readb($handle, -1));
+	closef($outFile);
+	if (checkError($error)) {
+		warn("Error while writing to file: $error");
+		$eMsg = "true";
+	}
+}
+
+# createDir($path, $type);
+sub createDir {
+	$path = $1;
+	$type = $2;
+	
+	mkdir($path)
+	if (checkError($error)) {
+		warn("Unable to create $type directory: $error");
+		$eMsg = "true";
+	}
+}
+
+# Unzips the downloaded zipfile and puts the folder in the main project directory
+# unzip($name, $folderName);
+sub unzip {
+	$zipFileName = $1 . ".zip";
+	$folderName = $2;
+	
+	$zipFile = $saveFilePath . "/" . $zipFileName;
+	$destPathProper = $destPath . "/" . $folderName;
+	$currDir = cwd();
+
+	# load and unzip zipfile
+	$fis = [new java.io.FileInputStream: $zipFile];
+	$zis = [new java.util.zip.ZipInputStream: $fis];
+	
+	if ([$fis available] == 0) {
+		println("Archive is empty. Aborting.");
+		[$zis closeEntry];
+		[$fis close];
+		exit();
+	}
+
+	#Create and go to the destination directory
+	createDir($destPathProper, "zip destination");
+	chdir($destPathProper);
+	
+	# Write all zip contents to the directory
+	$entry = [$zis getNextEntry];
+	while ($entry) {
+		# Check if $entry is an empty directory
+		if ([$entry isDirectory]) {
+			createDir(getFileProper($entry), "empty"); # Create empty directory
+		}
+		# Else $entry is a file
+		else {
+			$fullPath = getFileProper($destPathProper, $entry);
+			createDir(getFileProper(getFileParent($entry)), "parent"); # Create the parent directory
+			createFile($fullPath); # Create the file
+			
+			$zipHandle = [SleepUtils getIOHandle: $zis, $null];
+			writeFile($zipHandle, $fullPath);
+		}
+		$entry = [$zis getNextEntry];
+	}
+	[$zis closeEntry];
+	[$fis close];
+	
+	# Change directory back to initial
+	chdir($currDir);
+	println("> Files unzipped");
+}
+
+# Download a single repository and write the contents to downloads/repositoryname.zip
+sub downloadRepo {
+	$downloadUrl = $1;
+	$fileName = $2 . ".zip";
+	
+	# Create downloads dir if it does not exist
+	if (!-exists $saveFilePath) {
+		createDir($saveFilePath);
+	}
+	
+	println("> Downloading " . $fileName . "...");
+	println("\tDownload url: $downloadUrl");
+	
+	# Check if the zip file can be created
+	$saveFilePathProper = $saveFilePath . "/" . $fileName;
+	createFile($saveFilePathProper);
+	
+	# Obtain the content and write to file
+	$handle = httpGet($downloadUrl);
+	writeFile($handle, $saveFilePathProper);
+}
+
+# httpGet($url);
+# Adapted from https://gist.github.com/mgeeky/2d7f8c2a6ffbfd23301e1e2de0312087
+sub httpGet {
+	$method = "GET";
+	$url = $1;
+	$n = 0;
+
+	if(size(@_) == 2) { $n = $2; }
+
+	$maxRedirectsAllowed = 10;
+	if ($n > $maxRedirectsAllowed) {
+		warn("Exceeded maximum number of redirects: $method $url ");
+		return "";
+	}
+
+	$USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/111.0";
+
+	try {
+		# When using private git server, load the truststore with the custom root CA or self-signed CA from the current directory
+		$filepath = script_resource("truststore-public.jks");
+
+		# The trust store file and optional password to unlock it
+		$trustStoreFile = [new File: $filepath];
+		$trustStorePassword = "changeit";
+
+		# Load the trust store from file into an object, the type is "jks"
+		$trustStore = [KeyStore getInstance: "JKS"];
+		[$trustStore load: [new FileInputStream: $trustStoreFile], $trustStorePassword];
+
+		# init TrustManagerFactory with truststore containing root CA
+		$tmf = [TrustManagerFactory getInstance: [TrustManagerFactory getDefaultAlgorithm]];
+		[$tmf init: $trustStore];
+
+		# Set the SSLContext of the HTTP requests to ensure the root CA certificate is trusted
+		$sslContext = [SSLContext getInstance: "TLS"];
+		[$sslContext init: $null, [$tmf getTrustManagers], $null];
+		[javax.net.ssl.HttpsURLConnection setDefaultSSLSocketFactory: [$sslContext getSocketFactory]];
+
+		# Build the HTTP Request
+		$urlobj = [new java.net.URL: $url];
+		if (checkError($error)) {
+			warn("1: $error");
+		}
+		$con = $null;
+		$con = [$urlobj openConnection];
+		[$con setRequestMethod: $method];
+		[$con setInstanceFollowRedirects: true];
+		[$con setRequestProperty: "Accept", "*/*"];
+		[$con setRequestProperty: "Cache-Control", "max-age=0"];
+		[$con setRequestProperty: "Connection", "keep-alive"];
+		[$con setRequestProperty: "User-Agent", $USER_AGENT];		
+
+		# Send the request and obtain the content
+		$inputstream = [$con getInputStream];
+		$handle = [SleepUtils getIOHandle: $inputstream, $null];
+
+		$responseCode = [$con getResponseCode];
+
+		# If a redirect is returned, try again with the redirect target (max 10 times)
+		if (($responseCode >= 301) && ($responseCode <= 304)) {
+			warn("Redirect");
+			$loc = [$con getHeaderField: "Location"];
+			httpRequest($loc, $n + 1);
+		}
+
+
+		# return the handle with the content
+		return $handle;
+	}
+	catch $message {
+		warn("HTTP Request failed: $method $url : $message ");
+		printAll(getStackTrace());
+		return "";
+	}
+}
+
+
+# Create Cobalt Strike menu to download Arsenal
+popup Arsenal {
+	item("&Download", { loadArsenal() });
+}
+menubar("Arsenal", "Arsenal");
