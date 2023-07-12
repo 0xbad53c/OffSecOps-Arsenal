@@ -1,5 +1,7 @@
 # OffSecOps-Arsenal
-Aggressor script to automatically download and load an arsenal of open source and private Cobalt Strike tooling.
+Aggressor script to automatically download and load an arsenal of open source and private Cobalt Strike tooling. Blog post here:
+https://red.0xbad53c.com/red-team-operations/offsecops/arsenal-aggressor-script
+
 
 # Usage
 To use this proof of concept:
