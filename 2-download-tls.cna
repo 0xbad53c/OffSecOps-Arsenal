@@ -45,7 +45,7 @@ sub createDir {
 	$path = $1;
 	$type = $2;
 	
-	mkdir($path)
+	mkdir($path);
 	if (checkError($error)) {
 		warn("Unable to create $type directory: $error");
 		$eMsg = "true";
@@ -169,6 +169,6 @@ sub httpGet {
 
 # Create Cobalt Strike menu to download Arsenal
 popup Arsenal {
-	item("&Download", { loadArsenal() });
+	item("&Download", { loadArsenal(); });
 }
 menubar("Arsenal", "Arsenal");
